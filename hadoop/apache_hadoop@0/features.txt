@@ -1,0 +1,8 @@
+nuc
+aexp
+la
+asexp
+ld
+nd
+age
+ns

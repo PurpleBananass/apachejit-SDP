@@ -1,0 +1,21 @@
+name: jit
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - pip
+  # conda packages ONLY below (no pyexplainer here)
+  - numpy
+  - pandas            # if you’ll let pyexplainer pin below, you can omit version here
+  - scikit-learn
+  - xgboost
+  - lightgbm
+  - catboost
+  # pip-only packages go here:
+  - pip:
+      - pyexplainer==1.2.0
+      # pyexplainer currently pulls old pins; if you need it to be happy:
+      - "pandas<2"        # pyexplainer requires <2.0
+      - "ipython<8"
+      - "ipywidgets<8"

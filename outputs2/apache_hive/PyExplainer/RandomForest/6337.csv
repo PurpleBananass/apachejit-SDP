@@ -1,0 +1,3 @@
+commit_id,label,pred,score_or_proba,feature,value_actual,operator,threshold
+,True,True,0.8566666666666667,arexp,96.9999999999999,>,43.25
+,True,True,0.8566666666666667,nuc,174.0,>,96.14500045776369
