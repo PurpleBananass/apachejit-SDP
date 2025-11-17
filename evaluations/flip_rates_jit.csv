@@ -1,0 +1,13 @@
+Model,Explainer,Flip Rate
+RandomForest,LIME,1.0
+RandomForest,LIME-HPO,0.0
+RandomForest,PyExplainer,0.9683274021352313
+RandomForest,All,0.6561091340450771
+SVM,LIME,1.0
+SVM,LIME-HPO,0.0
+SVM,PyExplainer,0.966296928327645
+SVM,All,0.6554323094425484
+LogisticRegression,LIME,0.29104748097136646
+LogisticRegression,LIME-HPO,0.0
+LogisticRegression,PyExplainer,0.7908662558898152
+LogisticRegression,All,0.3606379122870605

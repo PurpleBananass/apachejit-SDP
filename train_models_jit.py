@@ -72,20 +72,19 @@ def train_single_project(project: str, train: pd.DataFrame, test: pd.DataFrame, 
 
     # Train *plain* sklearn classifiers (no Pipelines, no external scalers)
     model_specs = [
+        # Match original RF
         (RandomForestClassifier(
-            n_estimators=300,
-            class_weight="balanced_subsample",
-            n_jobs=-1,
+            n_estimators=100,
             random_state=SEED
         ), "RandomForest"),
+
+        # Match original SVM (defaults: RBF kernel, C=1.0, gamma='scale')
         (SVC(
-            kernel="rbf",
-            C=1.0,
-            gamma="scale",
-            probability=True,          # needed for AUC and explainers
-            class_weight="balanced",
+            probability=True,
             random_state=SEED
         ), "SVM"),
+
+        # You’re using LR instead of XGB — keep as-is
         (LogisticRegression(
             solver="lbfgs",
             max_iter=2000,
@@ -93,6 +92,7 @@ def train_single_project(project: str, train: pd.DataFrame, test: pd.DataFrame, 
             random_state=SEED
         ), "LogisticRegression"),
     ]
+
 
     for model, name in model_specs:
         tqdm.write(f"[TRAIN] {project} :: {name} (n={len(X_train)}, d={X_train.shape[1]})")

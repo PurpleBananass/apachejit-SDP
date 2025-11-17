@@ -8,11 +8,20 @@ import os
 from argparse import ArgumentParser
 from pathlib import Path
 from typing import Optional
+# imports near top
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+import multiprocessing as mp
+
 
 import numpy as np
 import pandas as pd
 from sklearn.exceptions import ConvergenceWarning
 from tqdm import tqdm
+import os
+# os.environ.setdefault("OMP_NUM_THREADS", "1")
+# os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+# os.environ.setdefault("MKL_NUM_THREADS", "1")
+# os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 # your existing LIME utils
 from Explainer.LIME_HPO import LIME_HPO, LIME_Planner
@@ -221,18 +230,22 @@ def _process_tp_idx_pyexp(
 
 # ---------- Main runner (LIME / LIME-HPO / PyExplainer) ----------
 
-def process_test_idx_lime(
-    test_idx, true_positives, train_df, model, output_path, explainer_type
-):
-    """Your original LIME/LIME-HPO worker (unchanged behavior)."""
-    ti = true_positives.loc[test_idx, :]
+def process_test_idx_lime(test_idx, true_positives, train_df, model, output_path, explainer_type):
     out_csv = output_path / f"{test_idx}.csv"
     if out_csv.exists():
         return None
 
+    # feature columns used for training
+    feat_cols = [c for c in train_df.columns if c != "target"]
+    X_train = train_df[feat_cols]
+
+    # take only those columns, in the same order (drop extras like commit_id)
+    ti_full = true_positives.loc[test_idx, :]
+    ti = ti_full.loc[feat_cols]  # align
+
     if explainer_type == "LIME":
         LIME_Planner(
-            X_train=train_df.drop(columns=["target"]),
+            X_train=X_train,
             test_instance=ti,
             training_labels=train_df[["target"]],
             model=model,
@@ -240,13 +253,14 @@ def process_test_idx_lime(
         )
     elif explainer_type == "LIME-HPO":
         LIME_HPO(
-            X_train=train_df.drop(columns=["target"]),
+            X_train=X_train,
             test_instance=ti,
             training_labels=train_df[["target"]],
             model=model,
             path=out_csv,
         )
     return os.getpid()
+
 
 
 def run_single_project(
@@ -263,6 +277,7 @@ def run_single_project(
     seed: int = 42,
     reuse_local_model: bool = False,
     verbose: bool = True,
+    max_workers: int = 1,
 ):
     output_path = get_output_dir(project_name, explainer_type, model_type)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -286,7 +301,14 @@ def run_single_project(
     else:
         raise ValueError(f"Unsupported explainer_type: {explainer_type}")
     print(f"[RUN  ] {project_name} :: {explainer_type} on {len(true_positives)} TPs")
-    with concurrent.futures.ProcessPoolExecutor() as executor:
+    Executor = ThreadPoolExecutor 
+    ex_kwargs = {"max_workers": max_workers}
+
+    with Executor(**ex_kwargs) as executor:
+    # with concurrent.futures.ProcessPoolExecutor(
+    #     max_workers=max_workers,
+    #     mp_context=mp.get_context("spawn")
+    # ) as executor:
         futures = [
             executor.submit(
                 worker,
@@ -327,11 +349,14 @@ def main():
     ap.add_argument("--project", type=str, default="all", help="'all' or space-separated list")
     # PyExplainer-specific (safe defaults)
     ap.add_argument("--top_k", type=int, default=5)
-    ap.add_argument("--max_rules", type=int, default=2000)
+    ap.add_argument("--max_rules", type=int, default=5)
     ap.add_argument("--max_iter", type=int, default=10000)
     ap.add_argument("--cv", type=int, default=5)
     ap.add_argument("--seed", type=int, default=SEED)
     ap.add_argument("--reuse_local_model", action="store_true")
+    ap.add_argument("--max-workers", type=int, default=max(1, (os.cpu_count() or 2)//2))
+    # ap.add_argument("--limit-tps", type=int, default=0, help="Process only first N true positives (0 = all).")
+
     args = ap.parse_args()
 
     projects = read_dataset()  # dict[project] = (train_df, test_df)
@@ -354,6 +379,7 @@ def main():
             cv=args.cv,
             seed=args.seed,
             reuse_local_model=args.reuse_local_model,
+            max_workers=args.max_workers,
         )
 
 

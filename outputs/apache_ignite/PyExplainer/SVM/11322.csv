@@ -1,0 +1,5 @@
+commit_id,label,pred,score_or_proba,feature,value_actual,min,max,operator,threshold
+,True,True,0.5867937479490597,la,1568.0,0.0,9094.0,<,348.0
+,True,True,0.5867937479490597,arexp,38.0,0.0,2143.5,>,253.5
+,True,True,0.5867937479490597,age,27.53125,0.0,575.0,>,46.920000076293945
+,True,True,0.5867937479490597,ld,2268.0,0.0,9176.0,<,2169.0
