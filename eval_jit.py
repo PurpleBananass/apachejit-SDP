@@ -1,30 +1,26 @@
-# eval_jit.py
-# -*- coding: utf-8 -*-
+# eval_jit.py (JIT version, fully rewritten)
 from __future__ import annotations
-
 import math
 import json
+from pathlib import Path
 from argparse import ArgumentParser
 from itertools import product
-from pathlib import Path
-from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 import pandas as pd
-from scipy.spatial.distance import mahalanobis
 from tabulate import tabulate
+from sklearn.preprocessing import StandardScaler
+from scipy.spatial.distance import mahalanobis
 
 from hyparams import PROPOSED_CHANGES, EXPERIMENTS
-from data_utils import read_dataset, get_model
-
-# If you kept get_flip_rates in flip_jit.py:
-try:
-    from flip_jit import get_flip_rates
-except Exception:
-    get_flip_rates = None  # RQ1 path will be disabled if not available
+from data_utils import read_dataset, get_model, get_true_positives
+from flip_jit import get_flip_rates
 
 
-# ---------- utilities (match training: raw numeric only, aligned cols) ----------
+# ----------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------
+# ---------- helpers: keep feature processing identical to training ----------
 def _numeric_frame(df: pd.DataFrame) -> pd.DataFrame:
     return (
         df.select_dtypes(include=[np.number])
@@ -32,12 +28,15 @@ def _numeric_frame(df: pd.DataFrame) -> pd.DataFrame:
           .fillna(0.0)
     )
 
-
 def _train_cols(train: pd.DataFrame) -> pd.Index:
+    """Return the numeric feature columns used for training (exclude target)."""
     return _numeric_frame(train.drop(columns=["target"], errors="ignore")).columns
 
-
 def _align_like_one(x_row: pd.Series, cols: pd.Index) -> pd.DataFrame:
+    """
+    Turn a single row (Series) into a 1×d DataFrame with the same numeric columns
+    and preprocessing as training.
+    """
     X = x_row.to_frame().T
     X = _numeric_frame(X)
     X = X.reindex(columns=list(cols), fill_value=0.0)
@@ -45,143 +44,103 @@ def _align_like_one(x_row: pd.Series, cols: pd.Index) -> pd.DataFrame:
         X[c] = pd.to_numeric(X[c], errors="coerce")
     return X
 
-
-def _generate_all_combinations(plan_dict: Dict[str, List[float]]) -> pd.DataFrame:
+def generate_all_combinations(plan_dict):
     feats = list(plan_dict.keys())
     values = list(plan_dict.values())
-    if len(feats) == 0:
-        return pd.DataFrame()
     combos = list(product(*values))
     return pd.DataFrame(combos, columns=feats)
 
-
-# ---------- distances ----------
-def cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
-    n1 = np.linalg.norm(vec1)
-    n2 = np.linalg.norm(vec2)
-    if n1 == 0 or n2 == 0:
-        return 0.0
-    return float(np.dot(vec1, vec2) / (n1 * n2))
-
-
-def cosine_all(df: pd.DataFrame, x: pd.Series | np.ndarray) -> List[float]:
-    if isinstance(x, pd.Series):
-        x = x.values
-    dists = []
-    for _, row in df.iterrows():
-        dists.append(cosine_similarity(x, row.values))
-    return dists
-
-
-def _stdz(col: pd.Series, v: float) -> float:
-    mu = float(col.mean())
-    sd = float(col.std()) if float(col.std()) != 0 else 1.0
-    return (float(v) - mu) / sd
-
-
-def mahalanobis_all(df: pd.DataFrame, x: pd.Series) -> List[float]:
+def normalized_mahalanobis_distance(df, x, y):
     """
-    Mahalanobis distances of x to each row in df, normalized by the span distance
-    (min vs max) along the same covariance. Robust to the single-feature case.
+    df : DataFrame of candidate combinations (plan grid)
+    x  : pd.Series of flipped values (on *at least* the plan features)
+    y  : pd.Series of baseline (first candidate values)
+
+    We:
+      1) drop constant columns from df
+      2) restrict x, y to the remaining columns
+      3) standardize all by df stats
+      4) compute Mahalanobis(x, y) normalized by span(min,max)
     """
-    # keep columns with >1 unique value
-    df = df.loc[:, (df.nunique() > 1)]
+    # 1) keep only features that actually vary
+    df = df.loc[:, df.nunique() > 1]
     if df.shape[1] == 0:
-        return []
+        return 0.0
 
-    # standardize within df (avoid 0 std)
-    std_df = (df - df.mean()) / df.std(ddof=0).replace(0, 1.0)
-    # x as standardized vector in the same columns/order
-    cols = list(std_df.columns)
-    x_std = np.array(
-        [(float(x[c]) - float(df[c].mean())) / (float(df[c].std(ddof=0)) or 1.0) for c in cols],
-        dtype=float,
-    )
+    cols = df.columns
 
-    # covariance over features (rowvar=False) → always 2D
-    cov = np.cov(std_df.values, rowvar=False, ddof=0)
+    # 2) restrict x, y to the same columns (this is what fixes your shape bug)
+    x = x[cols].astype(float)
+    y = y[cols].astype(float)
+
+    # 3) standardize within df
+    mu = df.mean()
+    sd = df.std(ddof=0).replace(0, 1.0)
+    Z = (df - mu) / sd
+
+    x_std = ((x - mu) / sd).values
+    y_std = ((y - mu) / sd).values
+
+    # covariance on standardized grid
+    cov = np.cov(Z.values, rowvar=False, ddof=0)
     cov = np.atleast_2d(cov)
     inv_cov = np.linalg.pinv(cov)
 
-    # span normalization (min↔max in standardized space)
-    min_vec = std_df.min().values
-    max_vec = std_df.max().values
-    max_span = float(mahalanobis(min_vec, max_vec, inv_cov))
+    # Mahalanobis distance between x and y
+    diff_xy = x_std - y_std
+    dist = float(np.sqrt(diff_xy @ inv_cov @ diff_xy))
+
+    # 4) span normalization based on min/max in standardized space
+    min_vec = Z.min().values
+    max_vec = Z.max().values
+    diff_span = max_vec - min_vec
+    max_span = float(np.sqrt(diff_span @ inv_cov @ diff_span))
+
     if not np.isfinite(max_span) or max_span == 0.0:
-        max_span = 1.0
+        # can't normalize; return raw distance
+        return dist
 
-    out: List[float] = []
-    for _, row in std_df.iterrows():
-        d = float(mahalanobis(x_std, row.values, inv_cov)) / max_span
-        out.append(d)
-    return out
-
-
-def normalized_mahalanobis_distance(
-    grid: pd.DataFrame, flipped: pd.Series, baseline: pd.Series
-) -> float:
-    """
-    Distance between flipped and baseline normalized by the grid’s covariance span.
-    Robust to the single-feature case.
-    """
-    if grid.shape[1] == 0:
-        return 0.0
-
-    cols = [c for c in grid.columns if c in flipped.index and c in baseline.index]
-    if not cols:
-        return 0.0
-    grid = grid[cols]
-    x = flipped[cols].astype(float)
-    y = baseline[cols].astype(float)
-
-    # standardize within grid
-    mu = grid.mean()
-    sd = grid.std(ddof=0).replace(0, 1.0)
-    std_grid = (grid - mu) / sd
-    x_std = ((x - mu) / sd).values.astype(float)
-    y_std = ((y - mu) / sd).values.astype(float)
-
-    cov = np.cov(std_grid.values, rowvar=False, ddof=0)
-    cov = np.atleast_2d(cov)
-    inv_cov = np.linalg.pinv(cov)
-
-    dist = float(mahalanobis(x_std, y_std, inv_cov))
-
-    min_vec = std_grid.min().values
-    max_vec = std_grid.max().values
-    max_span = float(mahalanobis(min_vec, max_vec, inv_cov))
-    if not np.isfinite(max_span) or max_span == 0.0:
-        return 0.0
     return dist / max_span
 
 
-# ---------- plan similarity (RQ2-style per flip) ----------
+
+# ----------------------------------------------------------------------
+# RQ2 – Plan Similarity
+# ----------------------------------------------------------------------
+
 def plan_similarity(project: str, model_type: str, explainer: str, threshold: float = 0.5):
     """
-    For each flipped TP having a plan, compute a normalized Mahalanobis
-    between (flipped values on changed features) vs (baseline = first candidate value per feature),
-    using the plan’s own candidate grid as the covariance reference.
+    For each flipped TP having a plan, compute normalized Mahalanobis
+    between (flipped values on changed features) vs (baseline = original),
+    using the plan’s own grid as covariance reference.
 
-    NOTE: For NICE there is no plans_all.json; we skip and return {}.
+    This fixes the 'all scores = 0' issue where baseline == flipped.
+    CF/NICE are skipped because they have no plans_all.json in the JIT pipeline.
     """
-    if explainer.upper() == "NICE":
-        # NICE has no per-feature plan grid; similarity is not defined
+    # CF/NICE: no plans → no RQ2
+    if explainer.upper() in ("CF", "NICE"):
         return {}
 
     results = {}
+
     plan_path = Path(PROPOSED_CHANGES) / f"{project}/{model_type}/{explainer}/plans_all.json"
-    flip_path = Path(EXPERIMENTS) / f"{project}/{model_type}/{explainer}_all.csv"
+    flip_path = Path(EXPERIMENTS)       / f"{project}/{model_type}/{explainer}_all.csv"
+
     if (not plan_path.exists()) or (not flip_path.exists()):
         return {}
 
+    # load plans
     with open(plan_path, "r") as f:
         plans = json.load(f)
 
+    # load flipped instances for this (project, model, explainer)
     flipped_df = pd.read_csv(flip_path, index_col=0).dropna()
     if flipped_df.empty:
         return {}
 
-    train, test = read_dataset()[project]
+    # dataset + model
+    ds = read_dataset()
+    train, test = ds[project]
     cols = _train_cols(train)
     model = get_model(project, model_type)
 
@@ -191,487 +150,441 @@ def plan_similarity(project: str, model_type: str, explainer: str, threshold: fl
             continue
 
         original = test.loc[test_idx, test.columns != "target"]
-        flipped = flipped_df.loc[test_idx, :]
+        flipped  = flipped_df.loc[test_idx, :]
 
-        # Verify the flip is indeed to "clean" (robust check)
-        X_orig = _align_like_one(original, cols)
-        X_flip = _align_like_one(flipped, cols)
-        try:
-            p_orig = float(model.predict_proba(X_orig)[0, 1])
-            p_flip = float(model.predict_proba(X_flip)[0, 1])
-            if not (p_orig >= threshold and p_flip < threshold):
-                # still compute similarity, but note mismatch
-                pass
-        except Exception:
-            # If no predict_proba, we can’t verify; proceed.
-            pass
+        # ---- optional: keep only real TP→non-defective flips ----
+        # try:
+        #     X_orig = _align_like_one(original, cols)
+        #     X_flip = _align_like_one(flipped,   cols)
+        #     if hasattr(model, "predict_proba"):
+        #         p_orig = float(model.predict_proba(X_orig)[0, 1])
+        #         p_flip = float(model.predict_proba(X_flip)[0, 1])
+        #         if not (p_orig >= threshold and p_flip < threshold):
+        #             print(f"Skipping idx {test_idx}: not TP→non-defective ({p_orig:.3f}→{p_flip:.3f})")
+        #             continue
+        # except Exception:
+        #     # if predict_proba or alignment fails, just skip the TP filter
+        #     pass
 
-        # Which features actually changed?
+        # ---- which features actually changed according to the plan? ----
         changed = {
             f
             for f in plans[key].keys()
-            if not math.isclose(
-                float(flipped[f]),
-                float(original[f]),
-                rel_tol=1e-7,
-                abs_tol=1e-12,
+            if (
+                f in flipped.index
+                and f in original.index
+                and not math.isclose(
+                    float(flipped[f]),
+                    float(original[f]),
+                    rel_tol=1e-7,
+                    abs_tol=1e-12,
+                )
             )
         }
         if not changed:
             continue
 
-        # Build plan grid & baseline
+        # only keep plan entries that correspond to changed features and have candidate values
         plan_subset = {f: list(plans[key][f]) for f in changed if len(plans[key][f]) > 0}
         if not plan_subset:
             continue
 
-        grid = _generate_all_combinations(plan_subset)
-        flipped_on_changed = flipped[list(plan_subset.keys())]
-        baseline = pd.Series(
-            [plans[key][f][0] for f in plan_subset.keys()],
-            index=list(plan_subset.keys()),
-            dtype=float,
-        )
+        # grid of all candidate combinations (same semantics as your old code)
+        grid = generate_all_combinations(plan_subset)
 
-        score = normalized_mahalanobis_distance(grid, flipped_on_changed, baseline)
+        # distance between CF vs original on these features
+        flipped_vec  = flipped[list(plan_subset.keys())].astype(float)
+        baseline_vec = original[list(plan_subset.keys())].astype(float)
+
+        score = normalized_mahalanobis_distance(grid, flipped_vec, baseline_vec)
         results[int(test_idx)] = {"score": float(score)}
 
     return results
 
 
-# ---------- feasibility (RQ3-like) ----------
-def _delta_pool_from_train_test(
-    train: pd.DataFrame, test: pd.DataFrame, features: List[str]
-) -> pd.DataFrame:
-    """Construct a rough 'historical delta' pool from consecutive diffs on concatenated train+test.
-    This is a pragmatic fallback for JIT splits where indices don't overlap."""
-    df = pd.concat(
-        [
-            train.drop(columns=["target"], errors="ignore"),
-            test.drop(columns=["target"], errors="ignore"),
-        ],
-        axis=0,
-        ignore_index=True,
-    )
-    df = _numeric_frame(df)
-    # only keep features that survived numeric filtering
-    features = [f for f in features if f in df.columns]
-    if not features:
-        return pd.DataFrame()
-    df = df[features]
-    # consecutive diffs; drop rows with all zeros
-    deltas = df.diff().dropna()
-    deltas = deltas.loc[(deltas != 0).any(axis=1)]
-    return deltas
 
 
-def flip_feasibility(
-    projects: List[str], explainer: str, model_type: str, distance: str = "mahalanobis"
-):
+# ----------------------------------------------------------------------
+# RQ3 – Feasibility
+# ----------------------------------------------------------------------
+
+def mahalanobis_all(pool, changed_series):
     """
-    Compute per-flip distance (min/max/mean) of changed vector vs a pool of 'historical' deltas.
-
-    - For LIME / LIME-HPO / PyExplainer: use plans_all.json to know which
-      features are allowed to change.
-    - For NICE: use all numeric JIT metrics where CF != original as changed features,
-      using CF_all.csv instead of <explainer>_all.csv and no plans_all.json.
+    pool: df of deltas
+    changed_series: pd.Series of feature deltas
     """
-    totals = 0
-    cannots = 0
-    written = 0
-    skipped_no_flipfile = 0
-    skipped_no_plan = 0
-    skipped_zero_change = 0
-    skipped_empty_pool = 0
-    skipped_rank_too_low = 0
+    # use only >1-unique columns
+    pool = pool.loc[:, pool.nunique() > 1]
+    if pool.empty:
+        return []
+
+    # standardize
+    mu = pool.mean()
+    sd = pool.std(ddof=0).replace(0, 1.0)
+    Z = (pool - mu) / sd
+
+    x = ((changed_series - mu) / sd).values.astype(float)
+
+    cov = np.cov(Z.values, rowvar=False)
+    cov = np.atleast_2d(cov)
+    inv_cov = np.linalg.pinv(cov)
+
+    # normalization span
+    min_vec = Z.min().values
+    max_vec = Z.max().values
+    span = float(mahalanobis(min_vec, max_vec, inv_cov))
+    if not np.isfinite(span) or span == 0:
+        span = 1.0
+
+    out = []
+    for _, row in Z.iterrows():
+        d = float(mahalanobis(x, row.values, inv_cov)) / span
+        out.append(d)
+
+    return out
+
+
+def cosine_similarity(a, b):
+    aa = np.linalg.norm(a)
+    bb = np.linalg.norm(b)
+    if aa == 0 or bb == 0:
+        return 0.0
+    return float(np.dot(a, b) / (aa * bb))
+
+
+def cosine_all(pool, changed_series):
+    out = []
+    for _, row in pool.iterrows():
+        out.append(cosine_similarity(changed_series.values, row.values))
+    return out
+
+
+
+def flip_feasibility(project_list, explainer, model_type, distance="mahalanobis"):
+
+    # Aggregate historical deltas
+    total_deltas = pd.DataFrame()
+    for project in project_list:
+        train, test = read_dataset()[project]
+        exist_idx = train.index.intersection(test.index)
+        deltas = (
+            test.loc[exist_idx, test.columns != "target"]
+            - train.loc[exist_idx, train.columns != "target"]
+        )
+        total_deltas = pd.concat([total_deltas, deltas], axis=0)
 
     results = []
+    totals = 0
+    cannots = 0
 
-    ds = read_dataset()
-    nice_mode = explainer.upper() == "NICE"
+    for project in project_list:
 
-    for project in projects:
-        if nice_mode:
-            plan_path = None
-            flip_path = Path(EXPERIMENTS) / f"{project}/{model_type}/CF_all.csv"
-        else:
-            plan_path = (
-                Path(PROPOSED_CHANGES)
-                / f"{project}/{model_type}/{explainer}/plans_all.json"
-            )
-            flip_path = (
-                Path(EXPERIMENTS) / f"{project}/{model_type}/{explainer}_all.csv"
-            )
-
-        if not flip_path.exists():
-            skipped_no_flipfile += 1
-            continue
-
-        flipped = pd.read_csv(flip_path, index_col=0).dropna()
-        if flipped.empty:
-            continue
-        totals += len(flipped)
-
-        if not nice_mode:
-            if not plan_path.exists():
-                skipped_no_plan += len(flipped)
-                continue
-            with open(plan_path, "r") as f:
-                plans = json.load(f)
-        else:
-            plans = None  # not used
-
-        train, test = ds[project]
-        # numeric metrics in train
-        train_num = _numeric_frame(train.drop(columns=["target"], errors="ignore"))
-        numeric_feats = list(train_num.columns)
-
-        for test_idx in flipped.index:
-            key = str(test_idx)
-
-            original = test.loc[test_idx, test.columns != "target"]
-            flip_row = flipped.loc[test_idx, :]
-
-            if nice_mode:
-                # NICE: changed = all numeric metrics that differ
-                changed = {
-                    f: float(flip_row[f]) - float(original[f])
-                    for f in numeric_feats
-                    if f in flip_row.index
-                    and f in original.index
-                    and not math.isclose(
-                        float(flip_row[f]),
-                        float(original[f]),
-                        rel_tol=1e-7,
-                        abs_tol=1e-12,
-                    )
-                }
-            else:
-                if key not in plans:
-                    skipped_no_plan += 1
-                    continue
-                changed = {
-                    f: flip_row[f] - original[f]
-                    for f in plans[key].keys()
-                    if not math.isclose(
-                        float(flip_row[f]),
-                        float(original[f]),
-                        rel_tol=1e-7,
-                        abs_tol=1e-12,
-                    )
-                }
-
-            if not changed:
-                skipped_zero_change += 1
-                continue
-
-            feat_names = list(changed.keys())
-            changed_vec = pd.Series(changed)
-
-            # build delta pool for these features
-            pool = _delta_pool_from_train_test(train, test, feat_names)
-            if pool.empty:
-                cannots += 1
-                skipped_empty_pool += 1
-                continue
-
-            if distance == "cosine":
-                dists = cosine_all(pool, changed_vec)
-            else:
-                # need at least (features+1) rows for covariance rank
-                if len(pool) <= len(feat_names):
-                    cannots += 1
-                    skipped_rank_too_low += 1
-                    continue
-                dists = mahalanobis_all(pool, changed_vec)
-
-            if isinstance(dists, list) and len(dists) > 0:
-                results.append(
-                    {
-                        "project": project,
-                        "min": float(np.min(dists)),
-                        "max": float(np.max(dists)),
-                        "mean": float(np.mean(dists)),
-                    }
-                )
-                written += 1
-            else:
-                cannots += 1
-                skipped_empty_pool += 1
-
-    print(
-        f"[{model_type} {explainer} {distance}] totals={totals}, written={written}, cannot={cannots} | "
-        f"no_flipfile={skipped_no_flipfile}, no_plan={skipped_no_plan}, zero_change={skipped_zero_change}, "
-        f"empty_pool={skipped_empty_pool}, rank_too_low={skipped_rank_too_low}"
-    )
-    return results, totals, cannots
-
-
-# ---------- absolute-change “implications” ----------
-def implications(project: str, explainer: str, model_type: str):
-    """
-    Sum of |z-scored deltas| over changed features per flipped instance.
-
-    - For LIME / LIME-HPO / PyExplainer: changed features are those in plans[key]
-      whose values actually changed.
-    - For NICE: changed features are all numeric JIT metrics whose values differ
-      between original and CF in CF_all.csv (no plans_all.json).
-    """
-    nice_mode = explainer.upper() == "NICE"
-
-    if nice_mode:
-        plan_path = None
-        flip_path = Path(EXPERIMENTS) / f"{project}/{model_type}/CF_all.csv"
-    else:
         plan_path = Path(PROPOSED_CHANGES) / f"{project}/{model_type}/{explainer}/plans_all.json"
         flip_path = Path(EXPERIMENTS) / f"{project}/{model_type}/{explainer}_all.csv"
 
-    if not flip_path.exists():
-        return []
+        if not flip_path.exists():
+            continue
+        if not plan_path.exists():
+            continue
 
-    if not nice_mode and not plan_path.exists():
-        return []
-
-    if nice_mode:
-        plans = None
-    else:
         with open(plan_path, "r") as f:
             plans = json.load(f)
 
-    flipped = pd.read_csv(flip_path, index_col=0).dropna()
-    if flipped.empty:
+        df_flip = pd.read_csv(flip_path, index_col=0).dropna()
+        totals += len(df_flip)
+
+        train, test = read_dataset()[project]
+
+        for idx in df_flip.index:
+            if str(idx) not in plans:
+                cannots += 1
+                continue
+
+            orig = test.loc[idx, test.columns != "target"]
+            flip = df_flip.loc[idx]
+
+            changed = {}
+            for feat in plans[str(idx)]:
+                if not math.isclose(flip[feat], orig[feat], rel_tol=1e-7, abs_tol=1e-12):
+                    changed[feat] = flip[feat] - orig[feat]
+
+            if not changed:
+                cannots += 1
+                continue
+
+            changed_series = pd.Series(changed)
+
+            pool = total_deltas[changed_series.index].dropna()
+            pool = pool.loc[(pool != 0).any(axis=1)]  # relaxed (OR)
+
+            if pool.empty:
+                cannots += 1
+                continue
+
+            if distance == "cosine":
+                d = cosine_all(pool, changed_series)
+            else:
+                if len(pool) <= len(changed_series):
+                    cannots += 1
+                    continue
+                d = mahalanobis_all(pool, changed_series)
+
+            if len(d) == 0:
+                cannots += 1
+                continue
+
+            results.append({
+                "min": float(np.min(d)),
+                "max": float(np.max(d)),
+                "mean": float(np.mean(d)),
+            })
+
+    return results, totals, cannots
+
+
+
+# ----------------------------------------------------------------------
+# Implications
+# ----------------------------------------------------------------------
+
+def implications(project, explainer, model_type):
+
+    plan_path = Path(PROPOSED_CHANGES) / f"{project}/{model_type}/{explainer}/plans_all.json"
+    flip_path = Path(EXPERIMENTS) / f"{project}/{model_type}/{explainer}_all.csv"
+
+    if not plan_path.exists() or not flip_path.exists():
+        return []
+
+    with open(plan_path, "r") as f:
+        plans = json.load(f)
+
+    df_flip = pd.read_csv(flip_path, index_col=0).dropna()
+    if df_flip.empty:
         return []
 
     train, test = read_dataset()[project]
-    train_num = _numeric_frame(train.drop(columns=["target"], errors="ignore"))
-    mu = train_num.mean()
-    sd = train_num.std(ddof=0).replace(0, 1.0)
+    feat_cols = [c for c in train.columns if c != "target"]
+
+    scaler = StandardScaler().fit(train[feat_cols])
 
     totals = []
-    for test_idx in flipped.index:
-        key = str(test_idx)
+    for idx in df_flip.index:
+        if str(idx) not in plans:
+            continue
 
-        orig = test.loc[test_idx, :]
-        flip = flipped.loc[test_idx, :]
+        orig = test.loc[idx, feat_cols]
+        flip = df_flip.loc[idx, feat_cols]
 
-        if nice_mode:
-            # changed = all numeric features that differ
-            changed = [
-                f
-                for f in train_num.columns
-                if f in flip.index
-                and f in orig.index
-                and not math.isclose(
-                    float(flip[f]),
-                    float(orig[f]),
-                    rel_tol=1e-7,
-                    abs_tol=1e-12,
-                )
-            ]
-        else:
-            if key not in plans:
-                continue
-            changed = [
-                f
-                for f in plans[key].keys()
-                if not math.isclose(
-                    float(flip[f]),
-                    float(orig[f]),
-                    rel_tol=1e-7,
-                    abs_tol=1e-12,
-                )
-            ]
+        changed = [f for f in plans[str(idx)]
+                   if not math.isclose(flip[f], orig[f], rel_tol=1e-7, abs_tol=1e-12)]
 
         if not changed:
             continue
 
-        # z-scored absolute deltas, summed
-        # restrict to numeric training metrics
-        changed_num = [c for c in changed if c in train_num.columns]
-        if not changed_num:
-            continue
+        s_orig = scaler.transform([orig])[0]
+        s_flip = scaler.transform([flip])[0]
 
-        z = (flip[changed_num] - orig[changed_num] - mu[changed_num]) / sd[changed_num]
-        totals.append(float(z.abs().sum()))
+        diff = np.abs(s_flip - s_orig)
+        total = float(sum(diff[orig.index.get_indexer(changed)]))
+        totals.append(total)
+
     return totals
 
 
-# ---------- CLI ----------
+
+# ----------------------------------------------------------------------
+# Main CLI
+# ----------------------------------------------------------------------
+
 if __name__ == "__main__":
-    ap = ArgumentParser()
-    ap.add_argument(
-        "--rq1",
-        action="store_true",
-        help="Flip rates per (model, explainer) using flip_jit.get_flip_rates",
-    )
-    ap.add_argument(
-        "--rq2",
-        action="store_true",
-        help="Plan similarity (normalized Mahalanobis) per flip",
-    )
-    ap.add_argument(
-        "--rq3",
-        action="store_true",
-        help="Feasibility distances vs historical delta pool",
-    )
-    ap.add_argument(
-        "--implications",
-        action="store_true",
-        help="Sum of |z-scored delta| over changed features",
-    )
-    ap.add_argument("--explainer", type=str, default="all")
-    ap.add_argument(
-        "--distance",
-        type=str,
-        default="mahalanobis",
-        choices=["mahalanobis", "cosine"],
-    )
+    parser = ArgumentParser()
+    parser.add_argument("--rq1", action="store_true")
+    parser.add_argument("--rq2", action="store_true")
+    parser.add_argument("--rq3", action="store_true")
+    parser.add_argument("--implications", action="store_true")
+    parser.add_argument("--explainer", type=str, default="all")
+    parser.add_argument("--distance", type=str, default="mahalanobis")
+    args = parser.parse_args()
 
-    args = ap.parse_args()
+    model_map = {
+        "SVM": "SVM",
+        "RandomForest": "RF",
+        "XGBoost": "XGB",
+        "CatBoost": "CB",
+        "LightGBM": "LGBM"
+    }
 
-    # What explainers exist in your JIT pipeline?
-    expl_map = {
+    explainer_map = {
         "LIME": "LIME",
         "LIME-HPO": "LIME-HPO",
-        "PyExplainer": "PyExplainer",
-        "NICE": "NICE",  # new
+        "TimeLIME": "TimeLIME",
+        "SQAPlanner_confidence": "SQAPlanner",
     }
-    explainers = (
-        list(expl_map.keys()) if args.explainer == "all" else args.explainer.split()
-    )
 
-    projects = read_dataset()
-    proj_names = sorted(projects.keys())
+    if args.explainer == "all":
+        explainers = list(explainer_map.keys())
+    else:
+        explainers = args.explainer.split()
 
-    # RQ1: flip rates (requires flip_jit.get_flip_rates) – we ignore NICE here
+    projects = read_dataset().keys()
+
+    # --------------------------------------------------------------
+    # RQ1 – Flip Rates
+    # --------------------------------------------------------------
     if args.rq1:
-        if get_flip_rates is None:
-            print("[WARN] flip_jit.get_flip_rates not found; skip RQ1.")
-        else:
-            table = []
-            for model_type in ["RandomForest", "SVM", "LogisticRegression"]:
-                for ex in explainers:
-                    if ex.upper() == "NICE":
-                        # flip_jit is for metamorphic flip pipeline only
-                        continue
-                    result = get_flip_rates(ex, None, model_type, verbose=False)
-                    table.append(
-                        [model_type, ex, result["Rate"] if result else 0.0]
-                    )
-                # per-model "All" row
-                rows = [r for r in table if r[0] == model_type]
-                if rows:
-                    table.append(
-                        [
-                            model_type,
-                            "All",
-                            float(np.mean([r[2] for r in rows])),
-                        ]
-                    )
-            print(tabulate(table, headers=["Model", "Explainer", "Flip Rate"]))
-            pd.DataFrame(table, columns=["Model", "Explainer", "Flip Rate"]).to_csv(
-                "./evaluations/flip_rates_jit.csv", index=False
-            )
+        table = []
+        for model in model_map:
+            for ex in explainers:
+                if ex.startswith("SQAPlanner"):
+                    r = get_flip_rates("SQAPlanner", "confidence", model, verbose=False)
+                    rate = r["Rate"]
+                    table.append([model_map[model], "SQAPlanner", rate])
+                else:
+                    r = get_flip_rates(ex, None, model, verbose=False)
+                    rate = r["Rate"]
+                    table.append([model_map[model], ex, rate])
 
-    # RQ2: plan similarity per flip (not defined for NICE)
+            # model mean
+            rates = [row[2] for row in table if row[0] == model_map[model]]
+            table.append([model_map[model], "All", float(np.mean(rates))])
+
+        df = pd.DataFrame(table, columns=["Model", "Explainer", "FlipRate"])
+        df.to_csv("./evaluations/flip_rates.csv", index=False)
+        print(tabulate(df, headers="keys", tablefmt="psql"))
+
+
+
+    # --------------------------------------------------------------
+    # RQ2 – Similarities
+    # --------------------------------------------------------------
     if args.rq2:
         Path("./evaluations/similarities").mkdir(parents=True, exist_ok=True)
-        for model_type in ["RandomForest", "SVM", "LogisticRegression"]:
-            sim_all = pd.DataFrame()
+        for model in model_map:
+            all_sim = pd.DataFrame()
             for ex in explainers:
-                if ex.upper() == "NICE":
-                    # No plans_all.json → skip similarity for NICE
-                    continue
-                for p in proj_names:
-                    sim = plan_similarity(p, model_type, ex)
+                for p in projects:
+                    sim = plan_similarity(p, model, ex)
                     if not sim:
                         continue
                     df = pd.DataFrame(sim).T
                     df["project"] = p
-                    df["explainer"] = ex
-                    df["model"] = model_type
-                    sim_all = pd.concat([sim_all, df], axis=0, ignore_index=False)
-            if not sim_all.empty:
-                out = f"./evaluations/similarities/{model_type}.csv"
-                sim_all.to_csv(out)
+                    df["model"] = model_map[model]
+                    df["explainer"] = explainer_map[ex]
+                    all_sim = pd.concat([all_sim, df])
 
-    # RQ3: feasibility distances (uses per-project delta pool)
+            out = f"./evaluations/similarities/{model_map[model]}.csv"
+            all_sim.to_csv(out)
+
+
+
+    # --------------------------------------------------------------
+    # RQ3 – Feasibility
+    # --------------------------------------------------------------
     if args.rq3:
-        Path(f"./evaluations/feasibility/{args.distance}").mkdir(
-            parents=True, exist_ok=True
-        )
+
+        Path(f"./evaluations/feasibility/{args.distance}").mkdir(parents=True, exist_ok=True)
+
+        # JIT project groups
+        project_groups = [
+            ["activemq@0","activemq@1","activemq@2","activemq@3"],
+            ["camel@0","camel@1","camel@2"],
+            ["derby@0","derby@1"],
+            ["groovy@0","groovy@1"],
+            ["hbase@0","hbase@1"],
+            ["hive@0","hive@1"],
+            ["jruby@0","jruby@1","jruby@2"],
+            ["lucene@0","lucene@1","lucene@2"],
+            ["wicket@0","wicket@1"],
+        ]
+
+        totals_all = 0
+        cannots_all = 0
         table = []
-        totals = cannots = 0
-        for model_type in ["RandomForest", "SVM", "LogisticRegression"]:
+
+        for model in model_map:
+
             for ex in explainers:
-                results, total, cannot = flip_feasibility(
-                    proj_names, ex, model_type, args.distance
-                )
-                totals += total
-                cannots += cannot
-                if not results:
-                    continue
-                df = pd.DataFrame(results)
-                df.to_csv(
-                    f"./evaluations/feasibility/{args.distance}/{model_type}_{ex}.csv",
-                    index=False,
-                )
-                table.append(
-                    [
-                        model_type,
-                        ex,
+                collected = []
+                totals = 0
+                cannots = 0
+
+                for group in project_groups:
+                    r, t, c = flip_feasibility(group, ex, model, args.distance)
+                    totals += t
+                    cannots += c
+                    collected.extend(r)
+
+                totals_all += totals
+                cannots_all += cannots
+
+                if collected:
+                    df = pd.DataFrame(collected)
+                    df.to_csv(
+                        f"./evaluations/feasibility/{args.distance}/{model_map[model]}_{explainer_map[ex]}.csv",
+                        index=False
+                    )
+                    table.append([
+                        model_map[model],
+                        explainer_map[ex],
                         df["min"].mean(),
                         df["max"].mean(),
                         df["mean"].mean(),
-                    ]
-                )
-            # per-model row
-            rows = [r for r in table if r[0] == model_type]
-            if rows:
-                table.append(
-                    [
-                        model_type,
-                        "Mean",
-                        float(np.mean([r[2] for r in rows])),
-                        float(np.mean([r[3] for r in rows])),
-                        float(np.mean([r[4] for r in rows])),
-                    ]
-                )
-        print(tabulate(table, headers=["Model", "Explainer", "Min", "Max", "Mean"]))
-        print(
-            f"Total flips: {totals}, Cannot: {cannots} ({(cannots/max(1, totals))*100:.2f}%)"
-        )
-        pd.DataFrame(
-            table, columns=["Model", "Explainer", "Min", "Max", "Mean"]
-        ).to_csv(f"./evaluations/feasibility_{args.distance}_jit.csv", index=False)
+                    ])
 
-    # Implications: absolute z-scored change sums
+            # model-level mean
+            rows = [r for r in table if r[0] == model_map[model]]
+            if rows:
+                table.append([
+                    model_map[model],
+                    "Mean",
+                    float(np.mean([r[2] for r in rows])),
+                    float(np.mean([r[3] for r in rows])),
+                    float(np.mean([r[4] for r in rows])),
+                ])
+
+        df = pd.DataFrame(table, columns=["Model","Explainer","Min","Max","Mean"])
+        df.to_csv(f"./evaluations/feasibility_{args.distance}.csv", index=False)
+        print(tabulate(df, headers="keys", tablefmt="psql"))
+        print(f"Total flips: {totals_all}, Cannot: {cannots_all}, ({cannots_all/totals_all*100:.2f}%)")
+
+
+
+    # --------------------------------------------------------------
+    # Implications
+    # --------------------------------------------------------------
     if args.implications:
         Path("./evaluations/abs_changes").mkdir(parents=True, exist_ok=True)
         table = []
-        for model_type in ["RandomForest", "SVM", "LogisticRegression"]:
+
+        for model in model_map:
             for ex in explainers:
-                all_vals = []
-                for p in proj_names:
-                    vals = implications(p, ex, model_type)
-                    all_vals.extend(vals)
-                if not all_vals:
+                collected = []
+
+                for p in projects:
+                    collected.extend(implications(p, ex, model))
+
+                if not collected:
                     continue
-                series = pd.Series(all_vals, name="zsum")
-                series.to_csv(
-                    f"./evaluations/abs_changes/{model_type}_{ex}.csv", index=False
+
+                df = pd.DataFrame(collected)
+                df.to_csv(
+                    f"./evaluations/abs_changes/{model_map[model]}_{explainer_map[ex]}.csv",
+                    index=False,
                 )
-                table.append([model_type, ex, float(series.mean())])
-            rows = [r for r in table if r[0] == model_type]
-            if rows:
-                table.append(
-                    [
-                        model_type,
-                        "Mean",
-                        float(np.mean([r[2] for r in rows])),
-                    ]
-                )
-        print(tabulate(table, headers=["Model", "Explainer", "Mean"]))
-        pd.DataFrame(table, columns=["Model", "Explainer", "Mean"]).to_csv(
-            "./evaluations/implications_jit.csv", index=False
-        )
+                table.append([
+                    model_map[model],
+                    explainer_map[ex],
+                    float(df.mean()),
+                ])
+
+            # model mean
+            rows = [r for r in table if r[0] == model_map[model]]
+            table.append([
+                model_map[model],
+                "Mean",
+                float(np.mean([r[2] for r in rows])),
+            ])
+
+        df = pd.DataFrame(table, columns=["Model","Explainer","Mean"])
+        df.to_csv("./evaluations/implications.csv", index=False)
+        print(tabulate(df, headers="keys", tablefmt="psql"))

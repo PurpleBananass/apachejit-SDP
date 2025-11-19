@@ -42,56 +42,78 @@ from pathlib import Path
 from hyparams import MODELS, OUTPUT, PROJECT_DATASET, RELEASE_DATASET
 
 # --- safer loader (same path layout) ------------------------------------------
+# def get_model(project_name: str, model_name: str = "RandomForest"):
+#     model_path = Path(MODELS) / project_name / f"{model_name}.pkl"
+#     if not model_path.exists():
+#         raise FileNotFoundError(f"Model not found: {model_path}")
+    # return joblib.load(model_path)
 def get_model(project_name: str, model_name: str = "RandomForest"):
-    model_path = Path(MODELS) / project_name / f"{model_name}.pkl"
-    if not model_path.exists():
-        raise FileNotFoundError(f"Model not found: {model_path}")
-    return joblib.load(model_path)
+
+    model_path = Path(f"{MODELS}/{project_name}/{model_name}.joblib")
+    model = joblib.load(model_path)
+    return model
 
 # --- true positives without external scaling ---------------------------------
+# def get_true_positives(
+#     model_or_path,
+#     train_data: pd.DataFrame,   # unused now, but kept for signature compatibility
+#     test_data: pd.DataFrame,
+#     label: str = "target",
+#     threshold: float = 0.5,
+# ) -> pd.DataFrame:
+#     """
+#     Return rows in test_data that are TRUE POSITIVES for the given model.
+#     Works with plain sklearn classifiers (RF/SVM/LR) and Pipelines.
+#     No manual scaling here — use the model as trained.
+#     """
+#     assert label in test_data.columns, f"'{label}' column missing in test_data"
+
+#     # Accept either a loaded model or a path
+#     if isinstance(model_or_path, (str, Path)):
+#         model = joblib.load(model_or_path)
+#     else:
+#         model = model_or_path
+
+#     # Build X_test / y_test (numeric features only)
+#     X_test = (
+#         test_data.drop(columns=[label], errors="ignore")
+#         .select_dtypes(include=[np.number])
+#         .replace([np.inf, -np.inf], np.nan)
+#         .fillna(0.0)
+#     )
+#     y_test = test_data[label].astype(bool).values
+
+#     # Predict positives
+#     try:
+#         y_proba = model.predict_proba(X_test)[:, 1]
+#         y_pred = (y_proba >= threshold)
+#     except Exception:
+#         # fallback for classifiers without predict_proba
+#         y_pred = np.asarray(model.predict(X_test)).astype(bool)
+
+#     mask_tp = (y_test == True) & (y_pred == True)
+#     # Return empty DF with same columns if no TPs
+#     if not mask_tp.any():
+#         return test_data.iloc[0:0].copy()
+
+#     return test_data.loc[mask_tp].copy()
+
 def get_true_positives(
-    model_or_path,
-    train_data: pd.DataFrame,   # unused now, but kept for signature compatibility
-    test_data: pd.DataFrame,
-    label: str = "target",
-    threshold: float = 0.5,
-) -> pd.DataFrame:
-    """
-    Return rows in test_data that are TRUE POSITIVES for the given model.
-    Works with plain sklearn classifiers (RF/SVM/LR) and Pipelines.
-    No manual scaling here — use the model as trained.
-    """
-    assert label in test_data.columns, f"'{label}' column missing in test_data"
+    model, train_data: DataFrame, test_data: DataFrame, label: str = "target"
+) -> DataFrame:
+    assert label in test_data.columns
 
-    # Accept either a loaded model or a path
-    if isinstance(model_or_path, (str, Path)):
-        model = joblib.load(model_or_path)
-    else:
-        model = model_or_path
+    ground_truth = test_data.loc[test_data[label], test_data.columns != label]
+    scaler = StandardScaler()
+    scaler.fit(train_data.drop("target", axis=1))
+    ground_truth_scaled = scaler.transform(ground_truth)
+    predictions = model.predict(ground_truth_scaled)
+    # true_positives = ground_truth[predictions]
+    true_positives = ground_truth.iloc[predictions.astype(bool).ravel()]
 
-    # Build X_test / y_test (numeric features only)
-    X_test = (
-        test_data.drop(columns=[label], errors="ignore")
-        .select_dtypes(include=[np.number])
-        .replace([np.inf, -np.inf], np.nan)
-        .fillna(0.0)
-    )
-    y_test = test_data[label].astype(bool).values
 
-    # Predict positives
-    try:
-        y_proba = model.predict_proba(X_test)[:, 1]
-        y_pred = (y_proba >= threshold)
-    except Exception:
-        # fallback for classifiers without predict_proba
-        y_pred = np.asarray(model.predict(X_test)).astype(bool)
+    return true_positives
 
-    mask_tp = (y_test == True) & (y_pred == True)
-    # Return empty DF with same columns if no TPs
-    if not mask_tp.any():
-        return test_data.iloc[0:0].copy()
-
-    return test_data.loc[mask_tp].copy()
 
 # --- fix the ratio helper (was passing only test & a path) --------------------
 def get_release_ratio(project_release):

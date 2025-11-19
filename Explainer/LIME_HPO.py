@@ -1,124 +1,21 @@
-# Explainer/LIME_HPO.py
-# -*- coding: utf-8 -*-
 import re
+from lime.lime_tabular import LimeTabularExplainer
 import numpy as np
 import pandas as pd
-from lime.lime_tabular import LimeTabularExplainer
 from scipy.optimize import differential_evolution
 from sklearn.preprocessing import StandardScaler
 from hyparams import SEED
 
 
-def _restore_rule_text(lime_scaler, dummy_scaled, feature_idx, a=None, b=None, feature=None, op=None):
-    """Convert thresholds from LIME's scaled space back to original feature scale."""
-    a_orig = b_orig = None
-    if a is not None:
-        dummy_scaled[feature_idx] = a
-        a_orig = lime_scaler.inverse_transform([dummy_scaled])[0][feature_idx]
-    if b is not None:
-        dummy_scaled[feature_idx] = b
-        b_orig = lime_scaler.inverse_transform([dummy_scaled])[0][feature_idx]
+def LIME_HPO(X_train, test_instance, training_labels, model, path):
+    """Hyper-parameter optimized LIME explainer with feature restoration."""
 
-    if op == ">":
-        return f"{feature} > {a_orig}"
-    elif op == "<=":
-        return f"{feature} <= {b_orig}"
-    else:
-        return f"{a_orig} < {feature} <= {b_orig}"
+    # Apply StandardScaler to preserve column names
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train.values)
+    test_instance_scaled = scaler.transform(test_instance.values.reshape(1, -1))
 
-
-def _rules_df_from_explanation(explanation, X_train, test_instance_raw, lime_scaler, top_k=5):
-    """
-    Build a LIME-style DataFrame WITHOUT using explanation.data:
-    columns: feature, value, importance, min, max, rule, importance_ratio
-    """
-    asmap = explanation.as_map()
-    label = 1 if 1 in asmap else next(iter(asmap.keys()))
-    top_pairs = asmap[label][:top_k]  # [(feat_idx, weight), ...]
-    if not top_pairs:
-        return pd.DataFrame(columns=["feature","value","importance","min","max","rule","importance_ratio"])
-
-    feat_idx = [i for i, _ in top_pairs]
-    top_feature_names = X_train.columns[feat_idx]
-
-    # importance values from text form
-    try:
-        pairs = explanation.as_list(label=label)[:top_k]
-        all_pairs = explanation.as_list(label=label)
-    except TypeError:
-        pairs = explanation.as_list()[:top_k]
-        all_pairs = explanation.as_list()
-
-    if not pairs:
-        return pd.DataFrame(columns=["feature","value","importance","min","max","rule","importance_ratio"])
-
-    rules_txt, importances = zip(*pairs)
-    denom = np.sum(np.abs([w for _, w in all_pairs])) or 1.0
-    importance_ratio = np.abs(np.array(importances)) / denom
-
-    # mins/maxs in original space
-    mins = X_train.min().iloc[feat_idx].values
-    maxs = X_train.max().iloc[feat_idx].values
-
-    # actual (original-space) values for this instance
-    values = test_instance_raw.iloc[feat_idx].values
-
-    # prepare scaled dummy vector for inverse-threshold restoration
-    test_scaled = lime_scaler.transform(test_instance_raw.values.reshape(1, -1))[0]
-    dummy = test_scaled.copy().tolist()
-
-    restored_rules = []
-    for i, rule in enumerate(rules_txt):
-        fname = top_feature_names[i]
-        fidx = feat_idx[i]
-        # (a < feat <= b)
-        m = re.search(rf"([-.\d]+)\s*<\s*{re.escape(fname)}\s*<=\s*([-.\d]+)", rule)
-        if m:
-            a, b = map(float, m.groups())
-            restored_rules.append(_restore_rule_text(lime_scaler, dummy, fidx, a=a, b=b, feature=fname))
-            continue
-        # (feat > a)
-        m = re.search(rf"{re.escape(fname)}\s*>\s*([-.\d]+)", rule)
-        if m:
-            a = float(m.group(1))
-            restored_rules.append(_restore_rule_text(lime_scaler, dummy, fidx, a=a, feature=fname, op=">"))
-            continue
-        # (feat <= b)
-        m = re.search(rf"{re.escape(fname)}\s*<=\s*([-.\d]+)", rule)
-        if m:
-            b = float(m.group(1))
-            restored_rules.append(_restore_rule_text(lime_scaler, dummy, fidx, b=b, feature=fname, op="<="))
-            continue
-        # fallback: keep the original LIME text
-        restored_rules.append(rule)
-
-    df = pd.DataFrame({
-        "feature": top_feature_names,
-        "value": values,
-        "importance": importances,
-        "min": mins,
-        "max": maxs,
-        "rule": restored_rules,
-        "importance_ratio": importance_ratio,
-    })
-    return df
-
-
-def LIME_HPO(X_train, test_instance, training_labels, model, path, model_scaler=None):
-    """
-    Hyper-parameter optimized LIME with rule restoration.
-    Heavy settings preserved (bounds 100–10000, maxiter=10, popsize=10).
-    """
-    lime_scaler = StandardScaler()
-    X_train_scaled = lime_scaler.fit_transform(X_train.values)
-    test_scaled = lime_scaler.transform(test_instance.values.reshape(1, -1))
-
-    # Ensure the model sees data in its own feature space
-    def _proba_in_model_space(X_scaled):
-        X_orig = lime_scaler.inverse_transform(np.asarray(X_scaled))
-        X_for_model = model_scaler.transform(X_orig) if model_scaler is not None else X_orig
-        return model.predict_proba(X_for_model)
-
+    # Initialize LIME explainer with training data and feature names
     explainer = LimeTabularExplainer(
         training_data=X_train_scaled,
         training_labels=training_labels,
@@ -128,19 +25,30 @@ def LIME_HPO(X_train, test_instance, training_labels, model, path, model_scaler=
         random_state=SEED,
     )
 
-    # Original heavy HPO settings
+    # Objective function to minimize residuals between model and LIME predictions
     def objective(params):
         num_samples = int(params[0])
-        exp = explainer.explain_instance(test_scaled[0], _proba_in_model_space, num_samples=num_samples)
-        local = exp.local_pred
-        model_p = _proba_in_model_space(test_scaled)[0]
-        res = model_p - local
-        ss_res = np.sum(res**2)
-        ss_tot = np.sum((model_p - np.mean(model_p))**2)
-        if ss_tot == 0:
-            return 100.0
-        return -(1 - ss_res/ss_tot)
+        explanation = explainer.explain_instance(
+            test_instance_scaled[0], model.predict_proba, num_samples=num_samples
+        )
+        local_model_predictions = explanation.local_pred
+        model_predictions = model.predict_proba(test_instance_scaled)[0]
 
+        # Calculate residuals and R² score
+        residuals = model_predictions - local_model_predictions
+        SS_res = np.sum(residuals**2)
+        SS_tot = np.sum((model_predictions - np.mean(model_predictions)) ** 2)
+
+        if SS_tot == 0:
+            print(
+                "SS_tot is 0 for this instance, likely due to no variance in model predictions."
+            )
+            return 100  # Apply a large penalty for non-variance cases
+
+        R2 = 1 - (SS_res / SS_tot)
+        return -R2  # Negative R² for minimization
+
+    # Hyperparameter optimization using differential evolution
     bounds = [(100, 10000)]
     result = differential_evolution(
         objective,
@@ -154,30 +62,106 @@ def LIME_HPO(X_train, test_instance, training_labels, model, path, model_scaler=
     )
     num_samples = int(result.x[0])
 
-    exp = explainer.explain_instance(
-        test_scaled[0],
-        _proba_in_model_space,
+    # Generate explanation with optimized number of samples
+    explanation = explainer.explain_instance(
+        test_instance_scaled[0],
+        model.predict_proba,
         num_samples=num_samples,
-        num_features=len(X_train.columns),  # keep as before
+        num_features=len(X_train.columns),
     )
-    df = _rules_df_from_explanation(exp, X_train, test_instance, lime_scaler, top_k=5)
-    df.to_csv(path, index=False)
+
+    # Extract top 5 features and their importance
+    top_features_rule = explanation.as_list()[:5]
+    top_features = explanation.as_map()[1]
+    top_features_index = [feature[0] for feature in top_features][:5]
+    top_feature_names = X_train.columns[top_features_index]
+
+    min_val = X_train.min()
+    max_val = X_train.max()
+
+    rules, importances = zip(*top_features_rule)
+    rules = list(rules)
+    importance_ratio = np.abs(np.array(importances)) / np.sum(
+        np.abs(np.array([imp for _, imp in explanation.as_list()]))
+    )
+
+    dummy = test_instance_scaled[0].copy().tolist()
+    # Restore original feature values in the rules
+    for i, rule in enumerate(rules):
+        feature = top_feature_names[i]
+        # Restore range (a < feature <= b)
+        matches = re.search(
+            r"([-.\d]+) < " + re.escape(feature) + r" <= ([-.\d]+)", rule
+        )
+        if matches:
+            a, b = map(float, matches.groups())
+
+            rules[i] = restore_rule(scaler, dummy, top_features_index[i], a, b, feature)
+            continue
+
+        # Restore case (feature > a)
+        matches = re.search(re.escape(feature) + r" > ([-.\d]+)", rule)
+        if matches:
+            a = float(matches.group(1))
+            rules[i] = restore_rule(
+                scaler, dummy, top_features_index[i], a, None, feature, ">"
+            )
+            continue
+
+        # Restore case (feature <= b)
+        matches = re.search(re.escape(feature) + r" <= ([-.\d]+)", rule)
+        if matches:
+            b = float(matches.group(1))
+            rules[i] = restore_rule(
+                scaler, dummy, top_features_index[i], None, b, feature, "<="
+            )
+            continue
+
+    # Create DataFrame to save the rules and export as CSV
+    rules_df = pd.DataFrame(
+        {
+            "feature": top_feature_names,
+            "value": test_instance[top_features_index],
+            "importance": importances,
+            "min": min_val[top_features_index],
+            "max": max_val[top_features_index],
+            "rule": rules,
+            "importance_ratio": importance_ratio,
+        }
+    )
+
+    rules_df.to_csv(path, index=False)
 
 
-def LIME_Planner(X_train, test_instance, training_labels, model, path, model_scaler=None):
-    """
-    Plain LIME with rule restoration.
-    Heavy default kept: we DO NOT set num_samples here (LIME default is ~5000).
-    """
-    lime_scaler = StandardScaler()
-    X_train_scaled = lime_scaler.fit_transform(X_train.values)
-    test_scaled = lime_scaler.transform(test_instance.values.reshape(1, -1))
+def restore_rule(
+    scaler, dummy, feature_idx, a=None, b=None, feature=None, operator=None
+):
+    """Helper function to restore original feature values."""
 
-    def _proba_in_model_space(X_scaled):
-        X_orig = lime_scaler.inverse_transform(np.asarray(X_scaled))
-        X_for_model = model_scaler.transform(X_orig) if model_scaler is not None else X_orig
-        return model.predict_proba(X_for_model)
+    if a is not None:
+        dummy[feature_idx] = a
+        a = scaler.inverse_transform([dummy])[0][feature_idx]
+    if b is not None:
+        dummy[feature_idx] = b
+        b = scaler.inverse_transform([dummy])[0][feature_idx]
 
+    if operator == ">":
+        return f"{feature} > {a}"
+    elif operator == "<=":
+        return f"{feature} <= {b}"
+    else:
+        return f"{a} < {feature} <= {b}"
+
+
+def LIME_Planner(X_train, test_instance, training_labels, model, path):
+    """LIME explainer with feature restoration."""
+
+    # Apply StandardScaler to preserve column names
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train.values)
+    test_instance_scaled = scaler.transform(test_instance.values.reshape(1, -1))
+
+    # Initialize LIME explainer with training data and feature names
     explainer = LimeTabularExplainer(
         training_data=X_train_scaled,
         training_labels=training_labels,
@@ -187,11 +171,67 @@ def LIME_Planner(X_train, test_instance, training_labels, model, path, model_sca
         random_state=SEED,
     )
 
-    exp = explainer.explain_instance(
-        test_scaled[0],
-        _proba_in_model_space,
-        num_features=len(X_train.columns),  # as you had it
-        # no num_samples -> heavy default
+    # Generate explanation with optimized number of samples
+    explanation = explainer.explain_instance(
+        test_instance_scaled[0], model.predict_proba, num_features=len(X_train.columns)
     )
-    df = _rules_df_from_explanation(exp, X_train, test_instance, lime_scaler, top_k=5)
-    df.to_csv(path, index=False)
+
+    # Extract top 5 features and their importance
+    top_features_rule = explanation.as_list()[:5]
+    top_features = explanation.as_map()[1]
+    top_features_index = [feature[0] for feature in top_features][:5]
+    top_feature_names = X_train.columns[top_features_index]
+
+    min_val = X_train.min()
+    max_val = X_train.max()
+
+    rules, importances = zip(*top_features_rule)
+    rules = list(rules)
+    importance_ratio = np.abs(np.array(importances)) / np.sum(
+        np.abs(np.array([imp for _, imp in explanation.as_list()]))
+    )
+    dummy = test_instance_scaled[0].copy().tolist()
+    # Restore original feature values in the rules
+    feature_name_to_index = {name: i for i, name in enumerate(X_train.columns)}
+    for i, scaled_rule in enumerate(rules):
+        matches = re.search(
+            r"([-]?[\d.]+)?\s*(<|>)?\s*([a-zA-Z_]+)\s*(<=|>=|<|>)?\s*([-]?[\d.]+)?",
+            scaled_rule,
+        )
+        match matches.groups():
+            case v1, "<", feature_name, "<=", v2:
+                feature_idx = feature_name_to_index[feature_name]
+                dummy[feature_idx] = float(v1)
+                l = scaler.inverse_transform([dummy])[0][feature_idx]
+                dummy[feature_idx] = float(v2)
+                r = scaler.inverse_transform([dummy])[0][feature_idx]
+                rule = f"{l} < {feature_name} <= {r}"
+                # assert min_val[feature_idx] <= l <= r <= max_val[feature_idx], (scaled_rule,v1, v2, l, r )
+            case None, None, feature_name, ">", v1:
+                feature_idx = feature_name_to_index[feature_name]
+                dummy[feature_idx] = float(v1)
+                r = scaler.inverse_transform([dummy])[0][feature_idx]
+                rule = f"{feature_name} > {r}"
+                # assert min_val[feature_idx] <= r <= max_val[feature_idx], (scaled_rule, v1, r )
+            case None, None, feature_name, "<=", v2:
+                feature_idx = feature_name_to_index[feature_name]
+                dummy[feature_idx] = float(v2)
+                l = scaler.inverse_transform([dummy])[0][feature_idx]
+                rule = f"{feature_name} <= {l}"
+                # assert min_val[feature_idx] <= l <= max_val[feature_idx], (scaled_rule, v2, l)
+
+        rules[i] = rule
+    # Create DataFrame to save the rules and export as CSV
+    rules_df = pd.DataFrame(
+        {
+            "feature": top_feature_names,
+            "value": test_instance[top_features_index],
+            "importance": importances,
+            "min": min_val[top_features_index],
+            "max": max_val[top_features_index],
+            "rule": rules,
+            "importance_ratio": importance_ratio,
+        }
+    )
+
+    rules_df.to_csv(path, index=False)

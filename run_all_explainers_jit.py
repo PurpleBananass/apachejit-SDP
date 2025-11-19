@@ -6,8 +6,8 @@ from itertools import product
 
 # model_types = ["LogisticRegression"]  
 # model_types = ["SVM"]  
-model_types = ["RandomForest"]  
-# model_types = ["RandomForest", "SVM", "LogisticRegression"]
+# model_types = ["RandomForest"]  
+model_types = ["RandomForest", "SVM", "LogisticRegression"]
 # explainer_types = ["LIME"]
 explainer_types = ["LIME-HPO"]
 # explainer_types = ["PyExplainer", "LIME-HPO", "LIME"]
@@ -18,8 +18,8 @@ for model, explainer in product(model_types, explainer_types):
     print(f"{'='*50}\n")
     
     subprocess.run([
-        "python", "run_explanations.py",
+        "python", "run_explainer.py",
         "--model_type", model,
         "--explainer_type", explainer,
-        "--max-workers", "8"
+        # "--max-workers", "8"
     ])

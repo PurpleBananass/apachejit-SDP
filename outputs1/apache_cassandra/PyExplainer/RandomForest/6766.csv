@@ -1,0 +1,5 @@
+commit_id,label,pred,score_or_proba,feature,value_actual,min,max,operator,threshold
+,True,True,0.84,nuc,605.375,0.0,2540.0,>,617.2149963378906
+,True,True,0.84,asexp,1.14814814815134,0.0,3637.0,>,0.7749999761581421
+,True,True,0.84,ent,1.5674410976707,0.0,6.25828457562083,<,1.6649999618530271
+,True,True,0.84,ndev,16.125,0.0,57.5,<,12.06500005722046
