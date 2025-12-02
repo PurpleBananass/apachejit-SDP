@@ -21,7 +21,8 @@ def LIME_HPO(X_train, test_instance, training_labels, model, path):
         training_labels=training_labels,
         feature_names=X_train.columns,
         feature_selection="lasso_path",
-        discretizer="entropy",
+        # discretizer="entropy",
+        discretizer="quartile",
         random_state=SEED,
     )
 
@@ -167,7 +168,8 @@ def LIME_Planner(X_train, test_instance, training_labels, model, path):
         training_labels=training_labels,
         feature_names=X_train.columns,
         feature_selection="lasso_path",
-        discretizer="entropy",
+        # discretizer="entropy",
+        discretizer="quartile",
         random_state=SEED,
     )
 

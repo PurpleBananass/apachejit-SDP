@@ -329,7 +329,7 @@ def run_project(project: str,
 def main():
     ap = ArgumentParser(description="NICE CFs (≤K by default; no refinement)")
     ap.add_argument("--project", type=str, default="all")
-    ap.add_argument("--model_types", type=str, default="RandomForest,SVM,LogisticRegression")
+    ap.add_argument("--model_types", type=str, default="RandomForest,SVM,XGBoost,LightGBM,CatBoost")
     ap.add_argument("--method", type=str, default="nice")
     ap.add_argument("--total_cfs", type=int, default=1)  # 1 CF per instance here
     ap.add_argument("--max_features", type=int, default=5)

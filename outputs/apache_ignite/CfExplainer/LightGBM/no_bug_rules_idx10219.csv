@@ -1,0 +1,2 @@
+antecedents,consequents,antecedent support,consequent support,support,confidence,lift,representativity,leverage,conviction,zhangs_metric,jaccard,certainty,kulczynski,length,generate_time,weightSupp
+"frozenset({'ns_ns=0', 'la_la=0'})",frozenset({'no bug'}),0.33303571428571427,0.26026785714285716,0.26026785714285716,0.7815013404825738,3.0026809651474533,1.0,0.17358936543367348,3.3855225679228758,1.0,0.7815013404825737,0.7046246244302747,0.8907506702412868,2,56,0.26026785714285716

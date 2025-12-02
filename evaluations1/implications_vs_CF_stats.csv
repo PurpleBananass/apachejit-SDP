@@ -1,0 +1,13 @@
+Model,Other,Baseline,Test,N,p_value,cliffs_delta,Magnitude,Median(other−CF)
+RF,LIME,CF,Wilcoxon (paired rank-sum),2773,7.163365602377924e-272,0.4916458472293947,large,1.7064882353798716
+RF,LIME-HPO,CF,Wilcoxon (paired rank-sum),1021,6.43354033748453e-71,0.3964799926326766,medium,0.96299620698476
+RF,PyExplainer,CF,Wilcoxon (paired rank-sum),1395,2.2227012805046857e-64,0.2475245693143716,small,0.1814827315439197
+RF,CF,CF,Wilcoxon (paired rank-sum),0,,,NA,
+SVM,LIME,CF,Wilcoxon (paired rank-sum),1052,2.015666358381921e-124,0.43558530555595715,medium,0.8710017456885741
+SVM,LIME-HPO,CF,Wilcoxon (paired rank-sum),0,,,NA,
+SVM,PyExplainer,CF,Wilcoxon (paired rank-sum),0,,,NA,
+SVM,CF,CF,Wilcoxon (paired rank-sum),0,,,NA,
+LR,LIME,CF,Wilcoxon (paired rank-sum),0,,,NA,
+LR,LIME-HPO,CF,Wilcoxon (paired rank-sum),0,,,NA,
+LR,PyExplainer,CF,Wilcoxon (paired rank-sum),0,,,NA,
+LR,CF,CF,Wilcoxon (paired rank-sum),0,,,NA,

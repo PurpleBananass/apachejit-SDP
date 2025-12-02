@@ -54,7 +54,12 @@ def run_single_project(
 ):
     output_path = get_output_dir(project_name, explainer_type, model_type)
     model = get_model(project_name, model_type)
+    print(f"[DEBUG] {project_name} / {model_type} / {explainer_type}")
+    print("[DEBUG] computing true positives...")
     true_positives = get_true_positives(model, train_data, test_data)
+    print("[DEBUG] done true positives, len =", len(true_positives))
+
+    # true_positives = get_true_positives(model, train_data, test_data)
 
     if len(true_positives) == 0:
         print("No true positives found, skipping...")

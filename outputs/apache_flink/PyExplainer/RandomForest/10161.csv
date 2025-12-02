@@ -1,2 +1,4 @@
-rule,type,coef,support,importance,Class
-asexp <= 4.565000057220459 & aexp <= 45.959999084472656 & nuc > 1.3450000286102295,rule,2.7205874188134845e-23,0.2454308093994778,1.1707839484014672e-23,Defect
+commit_id,label,pred,score_or_proba,feature,value_actual,min,max,operator,threshold
+,True,False,0.4,nuc,2.1666666666666696,0.0,251.0,>,-4.125
+,True,False,0.4,la,46.0,0.0,9886.0,>,44.9950008392334
+,True,False,0.4,ld,46.0,0.0,9281.0,>,-59.42500114440918

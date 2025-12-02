@@ -41,32 +41,14 @@ def perturb(low, high, current, values, dtype):
 
 
 def split_inequality(rule, min_val, max_val, pattern):
-    m = pattern.search(rule)
-    if not m:
-        raise ValueError(f"Could not parse rule: {rule}")
-
-    v1, op1, feature_name, op2, v2 = m.groups()
-    # v1, op1 = left number and operator (optional)
-    # feature_name = the feature
-    # op2, v2 = right operator and number (optional)
-
-    # Case: v1 < feature_name <= v2
-    if v1 is not None and op1 == "<" and op2 == "<=" and v2 is not None:
-        l, r = float(v1), float(v2)
-
-    # Case: feature_name > v1   (stored as: v1=None, op1=None, feature_name, op2=">", v2)
-    elif v1 is None and op1 is None and op2 == ">" and v2 is not None:
-        l, r = float(v2), max_val[feature_name]
-
-    # Case: feature_name <= v2  (stored as: v1=None, op1=None, feature_name, op2="<=", v2)
-    elif v1 is None and op1 is None and op2 == "<=" and v2 is not None:
-        l, r = min_val[feature_name], float(v2)
-
-    else:
-        raise ValueError(f"Unhandled rule pattern: {rule} (groups={m.groups()})")
-
+    match pattern.search(rule).groups():
+        case v1, "<", feature_name, "<=", v2:
+            l, r = float(v1), float(v2)
+        case None, None, feature_name, ">", v1:
+            l, r = float(v1), max_val[feature_name]
+        case None, None, feature_name, "<=", v2:
+            l, r = min_val[feature_name], float(v2)
     return feature_name, [l, r]
-
 
 
 def flip_feature_range(feature, min_val, max_val, importance, rule_str):
@@ -129,132 +111,132 @@ def run_single(
     all_plans = {}
     model = get_model(project_name, model_type)
     true_positives = get_true_positives(model, train, test)
-    perturb_features = {}
+
     for test_idx in tqdm(
         true_positives.index, desc=f"{project_name}", leave=True, disable=not verbose
     ):
         test_instance = test.loc[test_idx]
         assert test_instance["target"] == 1
 
-        if explainer_type in ("LIME", "LIME-HPO"):
-            explanation_path = output_path / f"{test_idx}.csv"
+        match explainer_type:
+            case "LIME" | "LIME-HPO":
+                explanation_path = output_path / f"{test_idx}.csv"
 
-            if not explanation_path.exists():
-                print("????")
-                continue
-            explanation = pd.read_csv(explanation_path)
-
-            plan = []
-            for row in range(len(explanation)):
-                (
-                    feature,
-                    value,
-                    importance,
-                    min_val,
-                    max_val,
-                    rule,
-                    importance_ratio,
-                ) = explanation.iloc[row].values
-                proposed_changes = flip_feature_range(
-                    feature,
-                    train_min[feature],
-                    train_max[feature],
-                    importance,
-                    rule,
-                )
-                if proposed_changes:
-                    plan.append(proposed_changes)
-
-            
-
-            for proposed_changes in plan:
-                feature = proposed_changes[1]
-                dtype = train.dtypes[feature]
-                perturbations = perturb(
-                    proposed_changes[0],
-                    proposed_changes[2],
-                    test_instance[feature],
-                    feature_values[feature],
-                    dtype,
-                )
-                if not perturbations:
+                if not explanation_path.exists():
+                    print("????")
                     continue
-                perturb_features[feature] = perturbations
+                explanation = pd.read_csv(explanation_path)
 
-        elif explainer_type == "TimeLIME":
-            explanation_path = Path(f"{output_path}/{test_idx}.csv")
-
-            if not explanation_path.exists():
-                print("????")
-                continue
-            explanation = pd.read_csv(explanation_path)
-
-            plan = []
-            for row in range(len(explanation)):
-                (
-                    feature,
-                    value,
-                    importance,
-                    left,
-                    right,
-                    rec,
-                    rule,
-                    min_val,
-                    max_val,
-                ) = explanation.iloc[row].values
-                plan.append([left, feature, right])
-
-            perturb_features = {}
-            for proposed_changes in plan:
-                feature = proposed_changes[1]
-                dtype = train.dtypes[feature]
-                perturbations = perturb(
-                    proposed_changes[0],
-                    proposed_changes[2],
-                    test_instance[feature],
-                    feature_values[feature],
-                    dtype,
-                )
-                if not perturbations:
-                    continue
-                perturb_features[feature] = perturbations
-
-        elif explainer_type == "SQAPlanner":
-            try:
-                plan = pd.read_csv(output_path / f"{test_idx}.csv")
-            except pd.errors.EmptyDataError:
-                if verbose:
-                    print(f"EmptyDataError: {project_name} {test_idx}")
-                continue
-
-            if len(plan) == 0:
-                continue
-
-            perturb_features = {}
-            for _, row in plan.iterrows():
-                if len(perturb_features) > 0:
-                    break
-                best_rule = row["Antecedent"]
-                for rule in best_rule.split("&"):
-                    feature, ranges = split_inequality(
-                        rule, train_min, train_max, pattern
+                plan = []
+                for row in range(len(explanation)):
+                    (
+                        feature,
+                        value,
+                        importance,
+                        min_val,
+                        max_val,
+                        rule,
+                        importance_ratio,
+                    ) = explanation.iloc[row].values
+                    proposed_changes = flip_feature_range(
+                        feature,
+                        train_min[feature],
+                        train_max[feature],
+                        importance,
+                        rule,
                     )
-                    if ranges[0] > ranges[1]:
-                        break
-                    if ranges[0] < train_min[feature]:
-                        ranges[0] = max(0, train_min[feature])
+                    if proposed_changes:
+                        plan.append(proposed_changes)
+
+                perturb_features = {}
+
+                for proposed_changes in plan:
+                    feature = proposed_changes[1]
+                    dtype = train.dtypes[feature]
                     perturbations = perturb(
-                        ranges[0],
-                        ranges[1],
+                        proposed_changes[0],
+                        proposed_changes[2],
                         test_instance[feature],
                         feature_values[feature],
-                        train.dtypes[feature],
+                        dtype,
                     )
-
                     if not perturbations:
                         continue
                     perturb_features[feature] = perturbations
 
+            case "TimeLIME":
+                explanation_path = Path(f"{output_path}/{test_idx}.csv")
+
+                if not explanation_path.exists():
+                    print("????")
+                    continue
+                explanation = pd.read_csv(explanation_path)
+
+                plan = []
+                for row in range(len(explanation)):
+                    (
+                        feature,
+                        value,
+                        importance,
+                        left,
+                        right,
+                        rec,
+                        rule,
+                        min_val,
+                        max_val,
+                    ) = explanation.iloc[row].values
+                    plan.append([left, feature, right])
+
+                perturb_features = {}
+                for proposed_changes in plan:
+                    feature = proposed_changes[1]
+                    dtype = train.dtypes[feature]
+                    perturbations = perturb(
+                        proposed_changes[0],
+                        proposed_changes[2],
+                        test_instance[feature],
+                        feature_values[feature],
+                        dtype,
+                    )
+                    if not perturbations:
+                        continue
+                    perturb_features[feature] = perturbations
+
+            case "SQAPlanner":
+                try:
+                    plan = pd.read_csv(output_path / f"{test_idx}.csv")
+                except pd.errors.EmptyDataError:
+                    if verbose:
+                        print(f"EmptyDataError: {project_name} {test_idx}")
+                    continue
+
+                if len(plan) == 0:
+                    continue
+
+                perturb_features = {}
+                for _, row in plan.iterrows():
+                    if len(perturb_features) > 0:
+                        break
+                    best_rule = row["Antecedent"]
+                    for rule in best_rule.split("&"):
+                        feature, ranges = split_inequality(
+                            rule, train_min, train_max, pattern
+                        )
+                        if ranges[0] > ranges[1]:
+                            break
+                        if ranges[0] < train_min[feature]:
+                            ranges[0] = max(0, train_min[feature])
+                        perturbations = perturb(
+                            ranges[0],
+                            ranges[1],
+                            test_instance[feature],
+                            feature_values[feature],
+                            train.dtypes[feature],
+                        )
+
+                        if not perturbations:
+                            continue
+                        perturb_features[feature] = perturbations
 
         all_plans[int(test_idx)] = perturb_features
     def convert_int64(o):
@@ -284,44 +266,43 @@ def get_importance_ratio(
         test_instance = test.loc[test_idx]
         assert test_instance["target"] == 1
 
-        if explainer_type in ("LIME", "LIME-HPO"):
-            explanation_path = output_path / f"{test_idx}.csv"
+        match explainer_type:
+            case "LIME" | "LIME-HPO":
+                explanation_path = output_path / f"{test_idx}.csv"
 
-            if not explanation_path.exists():
-                print("????")
-                continue
-            explanation = pd.read_csv(explanation_path)
+                if not explanation_path.exists():
+                    print("????")
+                    continue
+                explanation = pd.read_csv(explanation_path)
 
-            ratios = []
-            for row in range(len(explanation)):
-                (
-                    feature,
-                    value,
-                    importance,
-                    min_val,
-                    max_val,
-                    rule,
-                    importance_ratio,
-                ) = explanation.iloc[row].values
-                proposed_changes = flip_feature_range(
-                    feature,
-                    train_min[feature],
-                    train_max[feature],
-                    importance,
-                    rule,
-                )
-                if proposed_changes:
-                    ratios.append(importance_ratio)
-            total.append(sum(ratios))
-        # If you add other explainer types later, put more elif branches here
-
+                ratios = []
+                for row in range(len(explanation)):
+                    (
+                        feature,
+                        value,
+                        importance,
+                        min_val,
+                        max_val,
+                        rule,
+                        importance_ratio,
+                    ) = explanation.iloc[row].values
+                    proposed_changes = flip_feature_range(
+                        feature,
+                        train_min[feature],
+                        train_max[feature],
+                        importance,
+                        rule,
+                    )
+                    if proposed_changes:
+                        ratios.append(importance_ratio)
+                total.append(sum(ratios))
     return total
 
 
 if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--model_type", type=str, default="RandomForest")
-    parser.add_argument("--explainer_type", type=str, default="LIME-HPO")
+    parser.add_argument("--explainer_type", type=str, default="LIMEHPO")
     parser.add_argument("--project", type=str, default="all")
     parser.add_argument("--search_strategy", type=str, default=None)
     parser.add_argument("--only_minimum", action="store_true")

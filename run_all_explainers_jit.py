@@ -7,10 +7,10 @@ from itertools import product
 # model_types = ["LogisticRegression"]  
 # model_types = ["SVM"]  
 # model_types = ["RandomForest"]  
-model_types = ["RandomForest", "SVM", "LogisticRegression"]
+model_types = [ "XGBoost", "LightGBM", "CatBoost"]
 # explainer_types = ["LIME"]
-explainer_types = ["LIME-HPO"]
-# explainer_types = ["PyExplainer", "LIME-HPO", "LIME"]
+# explainer_types = ["LIME-HPO"]
+explainer_types = ["LIME-HPO", "LIME"]
 # explainer_types = ["PyExplainer"]
 for model, explainer in product(model_types, explainer_types):
     print(f"\n{'='*50}")

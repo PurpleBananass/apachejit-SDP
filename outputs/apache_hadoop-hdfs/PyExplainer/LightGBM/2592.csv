@@ -1,0 +1,3 @@
+commit_id,label,pred,score_or_proba,feature,value_actual,min,max,operator,threshold
+,True,True,0.998576268632362,aexp,399.0,0.0,726.0,>,-46.42999839782715
+,True,True,0.998576268632362,nd,1.0,1.0,40.0,>,0.949999988079071

@@ -1,0 +1,5 @@
+Model,Metric,Baseline,Explainer,N_baseline,N_other,p_value,cliffs_delta,cd_magnitude
+RF,L1,DeFlip,LIME,2773,2655,0.0,0.78,large
+RF,L1,DeFlip,LIME-HPO,2773,2654,0.0,0.78,large
+RF,L1,DeFlip,PyExplainer,2773,1443,0.0,0.29,small
+RF,L1,DeFlip,CfExplainer,2773,356,0.0,0.16,small

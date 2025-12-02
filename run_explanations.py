@@ -344,7 +344,7 @@ def run_single_project(
 
 def main():
     ap = ArgumentParser()
-    ap.add_argument("--model_type", type=str, default="RandomForest", help="Your get_model key (e.g., RandomForest|SVM|LogisticRegression).")
+    ap.add_argument("--model_type", type=str, default="XGBoost", help="Your get_model key (e.g., RandomForest|SVM|LogisticRegression).")
     ap.add_argument("--explainer_type", type=str, default="LIME-HPO", choices=["LIME", "LIME-HPO", "PyExplainer"])
     ap.add_argument("--project", type=str, default="all", help="'all' or space-separated list")
     # PyExplainer-specific (safe defaults)

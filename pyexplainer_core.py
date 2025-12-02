@@ -336,7 +336,7 @@ class PyExplainer:
         dep: str,
         blackbox_model,
         class_label=None,
-        top_k_rules: int = 3,
+        top_k_rules: int = 5,
         full_ft_names=None,
     ):
         if class_label is None:

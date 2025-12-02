@@ -1,15 +1,18 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import traceback
 import warnings
 import json
 import os
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from argparse import ArgumentParser
 from itertools import product
 from pathlib import Path
 
 import pandas as pd
 import numpy as np
-from sklearn.discriminant_analysis import StandardScaler
+from sklearn.preprocessing import StandardScaler
 from sklearn.exceptions import ConvergenceWarning
 from tabulate import tabulate
 from tqdm import tqdm
@@ -38,7 +41,6 @@ def get_flip_rates(explainer_type, search_strategy, model_type, verbose=True):
             exp_path = Path(
                 f"{EXPERIMENTS}/{project_name}/{model_type}/{explainer_type}_all.csv"
             )
-
         else:
             plan_path = Path(
                 f"{PROPOSED_CHANGES}/{project_name}/{model_type}/{explainer_type}_{search_strategy}/plans_all.json"
@@ -146,7 +148,6 @@ def flip_single_project(
         exp_path = Path(
             f"{EXPERIMENTS}/{project_name}/{model_type}/{explainer_type}_all.csv"
         )
-
     else:
         plan_path = Path(
             f"{PROPOSED_CHANGES}/{project_name}/{model_type}/{explainer_type}_{search_strategy}/plans_all.json"
@@ -157,9 +158,12 @@ def flip_single_project(
 
     plan_path.parent.mkdir(parents=True, exist_ok=True)
     exp_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(plan_path, "r") as f:
-        plans = json.load(f)
+    try:
+        with open(plan_path, "r") as f:
+            plans = json.load(f)
+    except FileNotFoundError:   
+        print(f"Plan file not found: {plan_path}")
+        return
 
     if exp_path.exists() and load:
         all_results_df = pd.read_csv(exp_path, index_col=0)
@@ -167,7 +171,7 @@ def flip_single_project(
         computed_test_names = list(map(str, all_results_df.index))
         test_names = [name for name in test_names if name not in computed_test_names]
         print(
-            f"{project}:{len(all_results_df.dropna())}/{len(all_results_df)}/{len(plans.keys())}"
+            f"{project_name}:{len(all_results_df.dropna())}/{len(all_results_df)}/{len(plans.keys())}"
         )
     else:
         all_results_df = pd.DataFrame()
@@ -175,7 +179,17 @@ def flip_single_project(
 
     model = get_model(project_name, model_type)
 
-    with ProcessPoolExecutor(max_workers=min(8, os.cpu_count())) as executor:
+    # ------------------ choose executor based on model_type ------------------
+    if model_type in ("XGBoost", "LightGBM", "CatBoost"):
+        # XGBoost/GBMs: avoid fork; use threads and fewer workers
+        Executor = ThreadPoolExecutor
+        max_workers = min(4, os.cpu_count() or 1)
+    else:
+        # RF/SVM: processes are fine
+        Executor = ProcessPoolExecutor
+        max_workers = min(8, os.cpu_count() or 1)
+
+    with Executor(max_workers=max_workers) as executor:
         futures = {}
         max_perturbations = []
         for test_name in tqdm(
@@ -184,7 +198,7 @@ def flip_single_project(
             leave=False,
             disable=not verbose,
         ):
-            # Calcuate the number of perturbations (len(A) * len(B) * ...)
+            # Calculate the number of perturbations (len(A) * len(B) * ...)
             features = list(plans[test_name].keys())
             computation = 1
             for feature in features:
@@ -204,7 +218,7 @@ def flip_single_project(
             features = list(plans[test_name].keys())
 
             changeable_features_dict = {
-                feature: [original_instance[feature]] + plans[test_name][feature]
+                feature: plans[test_name][feature]
                 for feature in features
             }
 
@@ -234,8 +248,9 @@ def flip_single_project(
                 tqdm.write(f"Error occurred: {e} id: {test_name}")
                 traceback.print_exc()
                 exit()
+
     print(
-        f"{project}:{len(all_results_df.dropna())}/{len(all_results_df)}/{len(plans.keys())}"
+        f"{project_name}:{len(all_results_df.dropna())}/{len(all_results_df)}/{len(plans.keys())}"
     )
 
 
@@ -261,14 +276,14 @@ if __name__ == "__main__":
         else:
             project_list = args.project.split(" ")
 
-        for project in tqdm(
+        for project_name in tqdm(
             project_list, desc="Projects", leave=True, disable=not args.verbose
         ):
-            train, test = projects[project]
+            train, test = projects[project_name]
             flip_single_project(
                 train,
                 test,
-                project,
+                project_name,
                 args.explainer_type,
                 args.search_strategy,
                 verbose=args.verbose,

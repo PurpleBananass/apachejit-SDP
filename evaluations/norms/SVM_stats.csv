@@ -1,0 +1,5 @@
+Model,Metric,Baseline,Explainer,N_baseline,N_other,p_value,cliffs_delta,cd_magnitude
+SVM,L1,DeFlip,LIME,2297,2241,0.0,0.7,large
+SVM,L1,DeFlip,LIME-HPO,2297,2226,0.0,0.7,large
+SVM,L1,DeFlip,PyExplainer,2297,473,0.0,0.33,medium
+SVM,L1,DeFlip,CfExplainer,2297,401,0.0,0.1,negligible

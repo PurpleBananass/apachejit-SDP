@@ -208,103 +208,209 @@ def visualize_rq1_jit(
 
 # ----------------------------- RQ2: Plan similarity -----------------------------
 
-def visualize_rq2_jit(
-    out_path: str = "./evaluations/jit_rq2.png",
-) -> None:
-    """
-    Histograms of plan similarity scores by (Explainer, Model) for JIT.
-    Uses ./evaluations/similarities/{Model}.csv from eval_jit.py --rq2.
+def visualize_rq2():
+    explainers = {
+        "LIME": "LIME",
+        "LIME-HPO": "LIME-HPO",
+        "PyExplainer": "PyExplainer"
+    }
+    models = {
+        "RF": "RandomForest",
+        "SVM": "SVM",
+        "LR": "LogisticRegression"
+    }
 
-    Simpler than the original: only uses the 'score' values for flipped instances
-    (no dummy rows for unflipped).
-    """
-    _ensure_eval_dir()
-    sns.set_theme(style="whitegrid")
     plt.rcParams["font.family"] = "Times New Roman"
 
-    explainers = ["LIME", "LIME-HPO", "PyExplainer"]
-    models = JIT_MODELS
-
+    # ---------------- load similarities base df ----------------
     total_df = pd.DataFrame()
     for model in models:
-        path = Path("./evaluations/similarities") / f"{model}.csv"
         try:
-            df = pd.read_csv(path)
+            df = pd.read_csv(f"./evaluations/similarities/{model}.csv", index_col=0)
+            total_df = pd.concat([total_df, df], ignore_index=False)
         except FileNotFoundError:
-            print(f"[RQ2] Similarities file not found for model {model}: {path}")
+            print(f"Warning: similarities file for {model} not found")
             continue
-        except Exception as e:
-            print(f"[RQ2] Error reading {path}: {e}")
-            continue
-
-        if df is None or df.empty or "score" not in df.columns:
-            print(f"[RQ2] No usable data in {path}")
-            continue
-
-        df["model"] = df.get("model", model)
-        total_df = pd.concat([total_df, df], ignore_index=True)
 
     if total_df.empty:
-        print("[RQ2] No similarity data found.")
+        print("No data to plot for RQ2.")
         return
 
-    # Clean up
-    total_df["score"] = pd.to_numeric(total_df["score"], errors="coerce")
-    total_df.dropna(subset=["score"], inplace=True)
+    total_df.index.set_names("idx", inplace=True)
+    total_df = total_df.set_index([total_df.index, total_df["project"]])
+    total_df = total_df.drop(columns=["project"])
 
-    nrows = len(explainers)
-    ncols = len(models)
-    fig, axes = plt.subplots(
-        nrows=nrows,
-        ncols=ncols,
-        figsize=(4 * ncols, 2.6 * nrows),
-        sharex=True,
-        sharey=True,
-    )
-    if nrows == 1:
-        axes = np.expand_dims(axes, axis=0)
-    if ncols == 1:
-        axes = np.expand_dims(axes, axis=1)
+    # ---------------- add flipped/unflipped rows ----------------
+    dset = read_dataset()
+    for project in dset:
+        train, test = dset[project]
+        for model_type, model_full in models.items():
+            try:
+                true_positives = get_true_positives(
+                    get_model(project, model_full), train, test
+                )
+            except Exception as e:
+                print(f"Warning: could not get TPs for {project} {model_type}: {e}")
+                continue
 
-    colors = sns.color_palette("crest", ncols)
+            for expl_label, expl_token in explainers.items():
+                flip_path = (
+                    Path(EXPERIMENTS)
+                    / f"{project}/{model_full}/{expl_token}_all.csv"
+                )
+                if not flip_path.exists():
+                    continue
 
-    for i, expl in enumerate(explainers):
-        for j, model in enumerate(models):
-            ax = axes[i, j]
-            sub = total_df[
-                (total_df["explainer"] == expl) & (total_df["model"] == model)
-            ]
-            if not sub.empty:
-                sns.histplot(
-                    data=sub,
-                    x="score",
-                    ax=ax,
-                    bins=10,
-                    stat="count",
-                    kde=False,
-                    color=colors[j],
+                try:
+                    df = pd.read_csv(flip_path, index_col=0)
+                except Exception:
+                    continue
+
+                df["model"] = model_type
+                df["explainer"] = expl_label
+                df["project"] = project
+
+                flipped = df.dropna()
+
+                # add unflipped with score=None
+                unflipped_index = true_positives.index.difference(flipped.index)
+                unflipped = pd.DataFrame(index=unflipped_index)
+                unflipped["model"] = model_type
+                unflipped["explainer"] = expl_label
+                unflipped["project"] = project
+                unflipped["score"] = None
+                unflipped.set_index(
+                    [unflipped.index, unflipped["project"]], inplace=True
+                )
+                unflipped = unflipped.drop(columns=["project"])
+
+                total_df = pd.concat(
+                    [total_df, unflipped[["model", "explainer", "score"]]],
+                    ignore_index=False,
                 )
 
-            if i == 0:
-                ax.set_title(JIT_MODEL_LABELS.get(model, model), fontsize=11)
-            if j == 0:
-                ax.set_ylabel(expl, fontsize=11)
-            else:
-                ax.set_ylabel("")
+    if total_df.empty:
+        print("No data to plot for RQ2 after adding flipped/unflipped.")
+        return
 
-            if i < nrows - 1:
+    # -------- max count per explainer (for y-limit) --------
+    colors = sns.color_palette("crest", len(models))
+    max_count = {}
+    for expl in explainers.keys():
+        max_count[expl] = 0
+        for model in models.keys():
+            df = total_df[
+                (total_df["explainer"] == expl) & (total_df["model"] == model)
+            ]
+            max_count[expl] = max(max_count[expl], len(df))
+
+    expl_list = list(explainers.keys())               # row order
+    model_list = list(models.keys())                  # column order
+    n_rows, n_cols = len(expl_list), len(model_list)
+
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(13, 5.5),
+        sharex=True,
+        sharey=False,
+    )
+    axes = np.array(axes).reshape(n_rows, n_cols)
+
+    for r, expl in enumerate(expl_list):
+        for c, model in enumerate(model_list):
+            ax = axes[r, c]
+            df = total_df[
+                (total_df["explainer"] == expl) & (total_df["model"] == model)
+            ]
+
+            if len(df) > 0:
+                sns.histplot(
+                    data=df,
+                    x="score",
+                    ax=ax,
+                    color=colors[c],
+                    stat="count",
+                    common_norm=False,
+                    common_bins=True,
+                    cumulative=True,
+                    bins=10,
+                )
+
+            ax.set_ylim(0, max_count[expl] + 250)
+            ax.set_yticks([])
+            ax.set_ylabel("")
+            ax.set_xlabel("")  # no per-panel label
+
+            # spines
+            if c == 0:
+                sns.despine(ax=ax, left=False, right=True, top=False, bottom=True)
+            elif c == n_cols - 1:
+                sns.despine(ax=ax, left=True, right=False, top=False, bottom=True)
+            else:
+                sns.despine(ax=ax, left=True, right=True, top=False, bottom=True)
+
+            # column titles (top row)
+            if r == 0:
+                ax.set_title(model, fontsize=12)
+
+            # row labels (first column)
+            if c == 0:
+                ax.set_ylabel(
+                    expl,
+                    fontsize=12,
+                    rotation=0,
+                    ha="right",
+                    va="center",
+                    labelpad=25,
+                )
+
+            # percentage annotations
+            if len(df) > 0:
+                for container in ax.containers:
+                    for bar_idx, bar in enumerate(container):
+                        if bar_idx == 0 or bar_idx == len(container) - 1:
+                            ax.text(
+                                bar.get_x() + bar.get_width() * (0.35 if bar_idx == 0 else 0.5),
+                                bar.get_height() + 20,
+                                f".{bar.get_height()/len(df)*100:.0f}",
+                                ha="center",
+                                va="bottom",
+                                fontsize=9,
+                                fontfamily="monospace",
+                            )
+
+            # x-axis ticks: only bottom row (SQAPlanner)
+            if r < n_rows - 1:
+                ax.set_xticks([])
                 ax.set_xticklabels([])
-                ax.set_xlabel("")
+                ax.tick_params(
+                    axis="x",
+                    which="both",
+                    bottom=False,
+                    top=False,
+                    labelbottom=False,
+                    labeltop=False,
+                )
             else:
-                ax.set_xlabel("Similarity score", fontsize=11)
-                ax.tick_params(axis="x", labelsize=10)
+                ticks = [0, 0.2, 0.4, 0.6, 0.8, 1.0]
+                ax.set_xticks(ticks)
+                ax.set_xticklabels(ticks, fontsize=10)
+                ax.tick_params(
+                    axis="x",
+                    which="both",
+                    bottom=True,
+                    top=False,
+                    labelbottom=True,
+                    labeltop=False,
+                    pad=2,
+                )
 
-            ax.tick_params(axis="y", labelleft=False)
+    # global x-label
+    fig.text(0.5, 0.04, "Similarity Score", ha="center", fontsize=12)
 
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=300)
-    plt.close()
-    print(f"[RQ2] Saved {out_path}")
+    plt.tight_layout(rect=[0.04, 0.08, 0.99, 0.98])
+    plt.savefig("./evaluations/rq2_combined.png", dpi=300)
 
 
 # ----------------------------- RQ3: Feasibility distances -----------------------------
@@ -570,7 +676,7 @@ def main():
     if args.rq1:
         visualize_rq1_jit()
     if args.rq2:
-        visualize_rq2_jit()
+        visualize_rq2()
     if args.rq3:
         visualize_rq3_jit()
     if args.implications:
